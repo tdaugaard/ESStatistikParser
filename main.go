@@ -40,18 +40,24 @@ type processStatistics struct {
 	timeSpentSplittingFile time.Duration
 }
 
+type appConfig struct {
+	maxQueueLen    int
+	file           string
+	onlyReadFile   bool
+	numberOfChunks int
+}
+
 var (
-	fileToProcess   string
+	config appConfig
+	stats  processStatistics
+
+	startTime    time.Time
+	chunkChannel chan fileChunk
+	wg           sync.WaitGroup
+
 	blocksProcessed int64
 	itemsProcessed  int64
 	fileProgress    float64
-	onlyReadFile    bool
-	maxQueueLen     int
-	numberOfChunks  int
-	stats           processStatistics
-	startTime       time.Time
-	chunkChannel    chan fileChunk
-	wg              sync.WaitGroup
 )
 
 const (
@@ -82,32 +88,32 @@ func printProcessStatistics() {
 func init() {
 	numCPU := runtime.NumCPU()
 
-	flag.StringVar(&fileToProcess, "f", "", "file to process")
-	flag.IntVar(&numberOfChunks, "w", numCPU, "number of workers")
-	flag.IntVar(&maxQueueLen, "q", defaultQueueItemsPerCPU, "max queue size per worker")
-	flag.BoolVar(&onlyReadFile, "ro", false, "just read the file, don't parse XML")
+	flag.StringVar(&config.file, "f", "", "file to process")
+	flag.IntVar(&config.numberOfChunks, "w", numCPU, "number of workers")
+	flag.IntVar(&config.maxQueueLen, "q", defaultQueueItemsPerCPU, "max queue size per worker")
+	flag.BoolVar(&config.onlyReadFile, "ro", false, "just read the file, don't parse XML")
 
 	flag.Parse()
 
-	maxQueueLen = maxQueueLen * numCPU
+	config.maxQueueLen = config.maxQueueLen * numCPU
 
-	if fileToProcess == "" {
+	if config.file == "" {
 		flag.Usage()
 		os.Exit(0)
 	}
 }
 
 func splitFile() chan fileChunk {
-	ch := make(chan fileChunk, maxQueueLen)
+	ch := make(chan fileChunk, config.maxQueueLen)
 
 	wg.Add(1)
 	go func() {
-		stat, err := os.Stat(fileToProcess)
+		stat, err := os.Stat(config.file)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		fh, err := os.Open(fileToProcess)
+		fh, err := os.Open(config.file)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -153,7 +159,7 @@ func splitFile() chan fileChunk {
 				indexEnd += indexBegin + splitStringEndLen
 
 				chunk := fileChunk{
-					file: fileToProcess,
+					file: config.file,
 					offset: byteOffset{
 						from: offset + int64(indexBegin),
 						to:   offset + int64(indexEnd),
@@ -230,7 +236,7 @@ func processChunk(chunk fileChunk) {
 }
 
 func main() {
-	fmt.Printf("Processing file using %d threads\n", numberOfChunks)
+	fmt.Printf("Processing file using %d threads\n", config.numberOfChunks)
 
 	statisticsTicker := time.NewTicker(100 * time.Millisecond)
 	go func() {
@@ -241,12 +247,12 @@ func main() {
 
 	chunkChannel = splitFile()
 
-	sem := make(chan bool, numberOfChunks)
+	sem := make(chan bool, config.numberOfChunks)
 
 	for chunk := range chunkChannel {
 		sem <- true
 
-		if !onlyReadFile {
+		if !config.onlyReadFile {
 			wg.Add(1)
 			go func(chunk fileChunk) {
 				processChunk(chunk)
