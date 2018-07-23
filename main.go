@@ -35,8 +35,14 @@ type xmlBlockSstatistik struct {
 }
 
 type processStatistics struct {
-	timeSpentParsingXML    int64
-	timeSpentSplittingFile time.Duration
+	blocksProcessed   int64
+	itemsProcessed    int64
+	progress          float64
+	timeParsingXML    int64
+	fileSize          int64
+	fileOffset        int64
+	timeSplittingFile int64
+	startTime         time.Time
 }
 
 type appConfig struct {
@@ -47,39 +53,34 @@ type appConfig struct {
 }
 
 var (
-	config appConfig
-	stats  processStatistics
-
-	startTime    time.Time
+	config       appConfig
+	stats        processStatistics
 	chunkChannel chan fileChunk
 	wg           sync.WaitGroup
-
-	blocksProcessed int64
-	itemsProcessed  int64
-	fileProgress    float64
 )
 
 const (
+	bufReadSize             = (4 * 1024 * 1024)
 	defaultQueueItemsPerCPU = 500
 )
 
 func printProcessStatistics() {
-	itemsProcessed := atomic.LoadInt64(&itemsProcessed)
-	blocksProcessed := atomic.LoadInt64(&blocksProcessed)
+	itemsProcessed := atomic.LoadInt64(&stats.itemsProcessed)
+	blocksProcessed := atomic.LoadInt64(&stats.blocksProcessed)
+	fileOffset := atomic.LoadInt64(&stats.fileOffset)
 
-	elapsedTime := time.Now().Sub(startTime)
-	itemsPerSecond := float64(blocksProcessed) / stats.timeSpentSplittingFile.Seconds()
-	blocksPerSecond := float64(itemsProcessed) / time.Since(startTime).Seconds()
+	fileProgress := float64(fileOffset*100) / float64(stats.fileSize)
+	elapsedTime := time.Now().Sub(stats.startTime)
+	itemsPerSecond := float64(blocksProcessed) / elapsedTime.Seconds()
+	blocksPerSecond := float64(itemsProcessed) / elapsedTime.Seconds()
 	queueSize := len(chunkChannel)
 
 	fmt.Printf(
-		"\r[%.02f%% - %s] blocks: %d, items: %d, (%.02f blocks/s, %.02f items/s); read: %.02fs, parse: %.02fs, queue: %d           ",
+		"\r[%.02f%% - %s] blocks: %d, items: %d, (%.02f blocks/s, %.02f items/s), queue: %d           ",
 		fileProgress,
 		elapsedTime.Round(time.Second).String(),
 		blocksProcessed, itemsProcessed,
 		itemsPerSecond, blocksPerSecond,
-		float64(stats.timeSpentSplittingFile)/float64(time.Second),
-		float64(stats.timeSpentParsingXML)/float64(time.Second),
 		queueSize,
 	)
 }
@@ -112,6 +113,8 @@ func splitFile() chan fileChunk {
 			log.Fatal(err)
 		}
 
+		stats.fileSize = stat.Size()
+
 		fh, err := os.Open(config.file)
 		if err != nil {
 			log.Fatal(err)
@@ -120,18 +123,16 @@ func splitFile() chan fileChunk {
 		defer close(ch)
 		defer wg.Done()
 
-		startTime = time.Now()
+		stats.startTime = time.Now()
 
-		const bufReadSize = (16 * 1024 * 1024)
+		var (
+			offset     int64
+			indexBegin int
+			indexEnd   int
+		)
 
 		splitStringBegin, splitStringEnd := []byte("<ns:Statistik>"), []byte("</ns:Statistik>")
-
 		splitStringEndLen := len(splitStringEnd)
-		indexBegin, indexEnd := 0, 0
-		offset := int64(0)
-
-		startTime := time.Now()
-		fileSize := stat.Size()
 
 		for {
 			buf := make([]byte, bufReadSize)
@@ -141,7 +142,7 @@ func splitFile() chan fileChunk {
 			}
 
 			indexEnd = 0
-			fileProgress = float64(offset*100) / float64(fileSize)
+			atomic.StoreInt64(&stats.fileOffset, offset)
 
 			for {
 				if indexBegin = bytes.Index(buf[indexEnd:nBytesRead], splitStringBegin); indexBegin == -1 {
@@ -165,12 +166,10 @@ func splitFile() chan fileChunk {
 					content: buf[indexBegin:indexEnd],
 				}
 
-				atomic.AddInt64(&blocksProcessed, 1)
+				atomic.AddInt64(&stats.blocksProcessed, 1)
 
 				ch <- chunk
 			}
-
-			stats.timeSpentSplittingFile = time.Since(startTime)
 
 			if readError == io.EOF {
 				break
@@ -212,8 +211,8 @@ func processChunk(chunk fileChunk) {
 				decoder.DecodeElement(&xmlBlock, &se)
 
 				timeElapsed := time.Since(startTime).Nanoseconds()
-				atomic.AddInt64(&stats.timeSpentParsingXML, timeElapsed)
-				atomic.AddInt64(&itemsProcessed, 1)
+				atomic.AddInt64(&stats.timeParsingXML, timeElapsed)
+				atomic.AddInt64(&stats.itemsProcessed, 1)
 
 				sha256.Sum256([]byte(xmlBlock.ArtNavn + ":" + xmlBlock.RegistreringNummerNummer + ":" + xmlBlock.Ident))
 				parseOK = true
