@@ -21,7 +21,6 @@ type byteOffset struct {
 }
 
 type fileChunk struct {
-	file    string
 	offset  byteOffset
 	content []byte
 }
@@ -159,7 +158,6 @@ func splitFile() chan fileChunk {
 				indexEnd += indexBegin + splitStringEndLen
 
 				chunk := fileChunk{
-					file: config.file,
 					offset: byteOffset{
 						from: offset + int64(indexBegin),
 						to:   offset + int64(indexEnd),
